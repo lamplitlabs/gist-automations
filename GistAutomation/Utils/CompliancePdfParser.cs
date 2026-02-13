@@ -1,161 +1,146 @@
-using System.Net.Http.Headers;
+using System.ClientModel;
 using System.Text;
 using System.Text.Json;
+using Azure.AI.OpenAI;
 using GistAutomation.Records;
+using OpenAI.Chat;
+using UglyToad.PdfPig;
 
 namespace GistAutomation.Utils;
 
 public static class CompliancePdfParser
 {
+  private const int BatchSize = 40;
+
   public static async Task<ComplianceInputFile> ParsePdfAsync(byte[] pdfBytes, string endpoint, string apiKey, string deployment)
   {
-    using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
-    http.DefaultRequestHeaders.Add("api-key", apiKey);
+    // Step 1: Extract text from PDF locally
+    Console.WriteLine("[AI] Extracting text from PDF...");
+    var pdfText = ExtractTextFromPdf(pdfBytes);
+    Console.WriteLine($"[AI] Extracted {pdfText.Length} characters from PDF.");
 
-    // Step 1: Upload PDF via Files API
-    Console.WriteLine("[AI] Uploading PDF to Azure OpenAI Files API...");
-    var fileId = await UploadFileAsync(http, endpoint, pdfBytes);
-    Console.WriteLine($"[AI] Uploaded file, id: {fileId}");
+    // Step 2: First, get the list of all service names
+    var clientOptions = new AzureOpenAIClientOptions(AzureOpenAIClientOptions.ServiceVersion.V2025_04_01_Preview);
+    var client = new AzureOpenAIClient(new Uri(endpoint), new ApiKeyCredential(apiKey), clientOptions);
+    var chatClient = client.GetChatClient(deployment);
 
-    // Step 2: Call Responses API with input_file reference
-    Console.WriteLine("[AI] Sending request to Azure OpenAI Responses API...");
+    Console.WriteLine("[AI] Step 1: Getting list of all service names...");
+    var serviceNames = await GetServiceNamesAsync(chatClient, pdfText);
+    Console.WriteLine($"[AI] Found {serviceNames.Count} services. Processing in batches of {BatchSize}...");
 
-    var systemPrompt = BuildSystemPrompt();
-    var userPrompt = BuildUserPrompt();
+    // Step 3: Process in batches
+    var allEntries = new List<ComplianceInputEntry>();
+    var batches = serviceNames.Chunk(BatchSize).ToList();
 
-    var requestBody = new
+    for (int i = 0; i < batches.Count; i++)
     {
-      model = deployment,
-      input = new object[]
-      {
-        new { role = "developer", content = systemPrompt },
-        new
-        {
-          role = "user",
-          content = new object[]
-          {
-            new { type = "input_file", file_id = fileId },
-            new { type = "input_text", text = userPrompt }
-          }
-        }
-      },
-      text = new
-      {
-        format = new
-        {
-          type = "json_schema",
-          name = "compliance_input_file",
-          schema = JsonSerializer.Deserialize<JsonElement>(GetResponseSchema()),
-          strict = false
-        }
-      },
-      temperature = 0f
+      var batch = batches[i];
+      Console.WriteLine($"[AI] Processing batch {i + 1}/{batches.Count} ({batch.Length} services)...");
+      var entries = await GetComplianceEntriesAsync(chatClient, pdfText, batch);
+      allEntries.AddRange(entries);
+      Console.WriteLine($"[AI] Batch {i + 1} returned {entries.Count} entries. Total so far: {allEntries.Count}");
+    }
+
+    if (allEntries.Count == 0)
+      throw new InvalidOperationException("Azure OpenAI returned zero service entries from the PDF.");
+
+    Console.WriteLine($"[AI] Extracted {allEntries.Count} service entries total.");
+
+    return new ComplianceInputFile
+    {
+      SourceDocument = "Microsoft Azure Compliance Offerings",
+      VerifiedDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
+      Entries = allEntries
+    };
+  }
+
+  private static async Task<List<string>> GetServiceNamesAsync(ChatClient chatClient, string pdfText)
+  {
+    var messages = new List<ChatMessage>
+    {
+      new SystemChatMessage("You extract Azure service names from compliance documents. Return ONLY a JSON array of service name strings exactly as they appear in the document."),
+      new UserChatMessage($"List ALL Azure service names from both the Azure and Azure Government compliance tables in this document. Return a JSON array of unique service names.\n\n{pdfText}")
     };
 
-    var json = JsonSerializer.Serialize(requestBody);
-    var responsesUrl = $"{endpoint.TrimEnd('/')}/openai/responses?api-version=2025-03-01-preview";
-
-    var request = new HttpRequestMessage(HttpMethod.Post, responsesUrl)
+    var options = new ChatCompletionOptions
     {
-      Content = new StringContent(json, Encoding.UTF8, "application/json")
+      ResponseFormat = ChatResponseFormat.CreateJsonSchemaFormat(
+        jsonSchemaFormatName: "service_names",
+        jsonSchema: BinaryData.FromString("""
+        {
+          "type": "object",
+          "properties": {
+            "serviceNames": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "required": ["serviceNames"]
+        }
+        """),
+        jsonSchemaIsStrict: false)
     };
 
-    Console.WriteLine($"[AI] POST {responsesUrl}");
-    Console.WriteLine("[AI] Waiting for response (this may take a few minutes)...");
-    var response = await http.SendAsync(request);
-    Console.WriteLine($"[AI] Response status: {response.StatusCode}");
-    var responseBody = await response.Content.ReadAsStringAsync();
+    var response = await chatClient.CompleteChatAsync(messages, options);
+    var content = response.Value.Content[0].Text;
 
-    if (!response.IsSuccessStatusCode)
-      throw new HttpRequestException($"Responses API failed with status {response.StatusCode}. Response: {responseBody}");
+    using var doc = JsonDocument.Parse(content);
+    return doc.RootElement.GetProperty("serviceNames")
+      .EnumerateArray()
+      .Select(e => e.GetString()!)
+      .Distinct()
+      .ToList();
+  }
 
-    // Step 3: Extract the output text from the response
-    var content = ExtractOutputText(responseBody);
-    Console.WriteLine("[AI] Received structured response from Azure OpenAI.");
+  private static async Task<List<ComplianceInputEntry>> GetComplianceEntriesAsync(ChatClient chatClient, string pdfText, string[] serviceNames)
+  {
+    var serviceList = string.Join("\n", serviceNames.Select((s, i) => $"{i + 1}. {s}"));
 
-    // Step 4: Clean up uploaded file
-    try
+    var messages = new List<ChatMessage>
     {
-      await DeleteFileAsync(http, endpoint, fileId);
-      Console.WriteLine("[AI] Cleaned up uploaded file.");
-    }
-    catch (Exception ex)
+      new SystemChatMessage(BuildSystemPrompt()),
+      new UserChatMessage(
+        ChatMessageContentPart.CreateTextPart($"Here is the extracted text from the PDF:\n\n{pdfText}"),
+        ChatMessageContentPart.CreateTextPart($"""
+          Extract compliance data ONLY for these specific services:
+          {serviceList}
+
+          {BuildUserPrompt()}
+          """))
+    };
+
+    var options = new ChatCompletionOptions
     {
-      Console.WriteLine($"[AI] Warning: Failed to delete uploaded file: {ex.Message}");
-    }
+      ResponseFormat = ChatResponseFormat.CreateJsonSchemaFormat(
+        jsonSchemaFormatName: "compliance_input_file",
+        jsonSchema: BinaryData.FromString(GetResponseSchema()),
+        jsonSchemaIsStrict: false)
+    };
+
+    var response = await chatClient.CompleteChatAsync(messages, options);
+    var content = response.Value.Content[0].Text;
 
     var inputFile = JsonSerializer.Deserialize<ComplianceInputFile>(content, new JsonSerializerOptions
     {
       PropertyNameCaseInsensitive = true
-    }) ?? throw new InvalidOperationException("Azure OpenAI returned empty or unparseable JSON.");
+    });
 
-    if (inputFile.Entries.Count == 0)
-      throw new InvalidOperationException("Azure OpenAI returned zero service entries from the PDF.");
-
-    Console.WriteLine($"[AI] Extracted {inputFile.Entries.Count} service entries.");
-    return inputFile;
+    return inputFile?.Entries ?? new List<ComplianceInputEntry>();
   }
 
-  private static async Task<string> UploadFileAsync(HttpClient http, string endpoint, byte[] pdfBytes)
+  private static string ExtractTextFromPdf(byte[] pdfBytes)
   {
-    var uploadUrl = $"{endpoint.TrimEnd('/')}/openai/files?api-version=2025-03-01-preview";
+    var sb = new StringBuilder();
+    using var document = PdfDocument.Open(pdfBytes);
 
-    using var form = new MultipartFormDataContent();
-    var fileContent = new ByteArrayContent(pdfBytes);
-    fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
-    form.Add(fileContent, "file", "azure_compliance_offerings.pdf");
-    form.Add(new StringContent("assistants"), "purpose");
-
-    var response = await http.PostAsync(uploadUrl, form);
-    var body = await response.Content.ReadAsStringAsync();
-
-    if (!response.IsSuccessStatusCode)
-      throw new HttpRequestException($"File upload failed with status {response.StatusCode}. Response: {body}");
-
-    using var doc = JsonDocument.Parse(body);
-    return doc.RootElement.GetProperty("id").GetString()
-        ?? throw new InvalidOperationException("File upload response missing 'id' field.");
-  }
-
-  private static async Task DeleteFileAsync(HttpClient http, string endpoint, string fileId)
-  {
-    var deleteUrl = $"{endpoint.TrimEnd('/')}/openai/files/{fileId}?api-version=2025-03-01-preview";
-    var response = await http.DeleteAsync(deleteUrl);
-    if (!response.IsSuccessStatusCode)
+    foreach (var page in document.GetPages())
     {
-      var body = await response.Content.ReadAsStringAsync();
-      throw new HttpRequestException($"File delete failed with status {response.StatusCode}. Response: {body}");
-    }
-  }
-
-  private static string ExtractOutputText(string responseBody)
-  {
-    using var doc = JsonDocument.Parse(responseBody);
-    var root = doc.RootElement;
-
-    // The Responses API returns output as an array; find the message output with text content
-    if (root.TryGetProperty("output", out var output))
-    {
-      foreach (var item in output.EnumerateArray())
-      {
-        if (item.TryGetProperty("type", out var type) && type.GetString() == "message")
-        {
-          if (item.TryGetProperty("content", out var contentArray))
-          {
-            foreach (var contentItem in contentArray.EnumerateArray())
-            {
-              if (contentItem.TryGetProperty("type", out var cType) && cType.GetString() == "output_text")
-              {
-                return contentItem.GetProperty("text").GetString()
-                    ?? throw new InvalidOperationException("Output text was null.");
-              }
-            }
-          }
-        }
-      }
+      sb.AppendLine($"--- Page {page.Number} ---");
+      sb.AppendLine(page.Text);
+      sb.AppendLine();
     }
 
-    throw new InvalidOperationException($"Could not extract output text from Responses API. Body: {responseBody}");
+    return sb.ToString();
   }
 
   private static string BuildSystemPrompt()
