@@ -53,14 +53,17 @@ public static class CompliancePdfParser
     };
 
     var json = JsonSerializer.Serialize(requestBody);
-    var responsesUrl = $"{endpoint.TrimEnd('/')}/openai/responses?api-version=2025-04-01-preview";
+    var responsesUrl = $"{endpoint.TrimEnd('/')}/openai/responses?api-version=2025-03-01-preview";
 
     var request = new HttpRequestMessage(HttpMethod.Post, responsesUrl)
     {
       Content = new StringContent(json, Encoding.UTF8, "application/json")
     };
 
+    Console.WriteLine($"[AI] POST {responsesUrl}");
+    Console.WriteLine("[AI] Waiting for response (this may take a few minutes)...");
     var response = await http.SendAsync(request);
+    Console.WriteLine($"[AI] Response status: {response.StatusCode}");
     var responseBody = await response.Content.ReadAsStringAsync();
 
     if (!response.IsSuccessStatusCode)
@@ -95,7 +98,7 @@ public static class CompliancePdfParser
 
   private static async Task<string> UploadFileAsync(HttpClient http, string endpoint, byte[] pdfBytes)
   {
-    var uploadUrl = $"{endpoint.TrimEnd('/')}/openai/files?api-version=2025-04-01-preview";
+    var uploadUrl = $"{endpoint.TrimEnd('/')}/openai/files?api-version=2025-03-01-preview";
 
     using var form = new MultipartFormDataContent();
     var fileContent = new ByteArrayContent(pdfBytes);
@@ -116,7 +119,7 @@ public static class CompliancePdfParser
 
   private static async Task DeleteFileAsync(HttpClient http, string endpoint, string fileId)
   {
-    var deleteUrl = $"{endpoint.TrimEnd('/')}/openai/files/{fileId}?api-version=2025-04-01-preview";
+    var deleteUrl = $"{endpoint.TrimEnd('/')}/openai/files/{fileId}?api-version=2025-03-01-preview";
     var response = await http.DeleteAsync(deleteUrl);
     if (!response.IsSuccessStatusCode)
     {
