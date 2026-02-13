@@ -1,6 +1,6 @@
 {
   "name": "gist-automations",
-  "image": "mcr.microsoft.com/devcontainers/dotnet:8.0",
+  "image": "mcr.microsoft.com/devcontainers/dotnet:latest",
   "customizations": {
     "vscode": {
       "extensions": [

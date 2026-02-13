@@ -5,6 +5,9 @@ on:
     - cron: "0 0 1 * *"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -15,14 +18,14 @@ jobs:
 
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: '10.0.x'
 
       - name: dotnet build
         working-directory: .
         run: dotnet build GistAutomation
 
       - name: run sync-country
-        run: dotnet run  "sync-country"
+        run: dotnet run -- "sync-country"
         working-directory: ./GistAutomation
         env:
           COUNTRY_STATE_GIST_ID: ${{ secrets.COUNTRY_STATE_GIST_ID }}
@@ -31,8 +34,24 @@ jobs:
 
       - name: run sync-currency
         working-directory: ./GistAutomation
-        run: dotnet run "sync-currency"
+        run: dotnet run -- "sync-currency"
         env:
           COUNTRY_STATE_GIST_ID: ${{ secrets.COUNTRY_STATE_GIST_ID }}
           CURRENCY_GIST_ID: ${{ secrets.CURRENCY_GIST_ID }}
           GIT_PERSONAL_TOKEN: ${{ secrets.GIT_PERSONAL_TOKEN }}
+
+      - name: run sync-compliance
+        working-directory: ./GistAutomation
+        run: dotnet run -- "sync-compliance"
+        env:
+          GIT_PERSONAL_TOKEN: ${{ secrets.GIT_PERSONAL_TOKEN }}
+          AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          AZURE_OPENAI_DEPLOYMENT: ${{ secrets.AZURE_OPENAI_DEPLOYMENT }}
+
+      - name: Commit config state
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add config.json
+          git diff --cached --quiet || (git commit -m "chore: update sync state" && git push)
