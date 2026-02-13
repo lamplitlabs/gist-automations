@@ -35,7 +35,7 @@ public static class StpDownloader
 
         Console.WriteLine($"[STP] Resolved document id: {docId}, whenLastModified: {whenLastModified}");
 
-        var downloadUrl = $"{LiveDocBaseUrl}/{documentGuid}/{docId}";
+        var downloadUrl = $"https://api.servicetrust.microsoft.com/api/v2/downloadDocuments/{documentGuid}/{docId}";
         Console.WriteLine($"[STP] Downloading PDF from {downloadUrl}...");
 
         client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/pdf"));
