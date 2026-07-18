@@ -10,4 +10,4 @@ Currencies => https://gist.github.com/manishtiwari25/d3984385b1cb200b98bcde69026
 
 ## License
 
-Licensed under the [MIT license](https://github.com/bitesinbyte/gist-automations/blob/main/LICENSE).
+Licensed under the [MIT license](https://github.com/lamplitlabs/gist-automations/blob/main/LICENSE).
